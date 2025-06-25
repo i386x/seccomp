@@ -10,7 +10,7 @@ RAPIDAST="rapidast"
 RAPIDAST_REPO_URL="https://github.com/RedHatProductSecurity/rapidast.git"
 HTTP_PORT="8765"
 
-TRUSTIFICATION_REGISTRY="${TRUSTIFICATION_REGISTRY:ghcr.io/trustification}"
+TRUSTIFICATION_REGISTRY="${TRUSTIFICATION_REGISTRY:-ghcr.io/trustification}"
 TRUSTD_IMAGE="${TRUSTD_IMAGE:-trustd}"
 TRUSTD_VERSION="${TRUSTD_VERSION:-latest}"
 
