@@ -60,23 +60,23 @@ function do_repo_op() {
 
     eval set -- "${opts}"
 
-    while [[ -n "$@" ]]; do
-        case "$1" in
+    while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
             -b | --branch)
                 branch="$2"
                 shift 2
-                ;;
+            ;;
             -n | --name)
                 name="$2"
                 shift 2
-                ;;
+            ;;
             --)
                 shift
                 break
-                ;;
+            ;;
             *)
-                die "${FUNCNAME[0]}: Unrecognized option: '$1'"
-                ;;
+                die "${FUNCNAME[0]}: Internal error"
+            ;;
         esac
     done
 
@@ -94,13 +94,13 @@ function do_repo_op() {
             if [[ ! -d "./${name}" ]]; then
                 git clone "${url}" "${name}" -b "${branch}"
             fi
-            ;;
+        ;;
         update)
             (cd "./${name}" && git pull --prune)
-            ;;
+        ;;
         *)
-            die "${FUNCNAME[0]}: Invalid operation: '${op}'"
-            ;;
+            die "${FUNCNAME[0]}: Invalid operation '${op}'"
+        ;;
     esac
 }
 
@@ -131,19 +131,42 @@ function ws_update() (
 function build_container() (
     local skip="no"
 
+    local opts=$(
+        getopt \
+            --options f \
+            --longoptions force,skip-build \
+            --name ${FUNCNAME[0]} \
+            -- \
+            "$@"
+    )
+
+    eval set -- "${opts}"
+
     if podman container exists "${CONTAINER}"; then
         skip="yes"
     fi
     if podman image exists "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"; then
         skip="yes"
     fi
+
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
-            -f | --force) skip="no" ;;
-            --skip-build) skip="yes" ;;
-            # ignore unknown options as they can have meaning in other subtasks
+            -f | --force)
+                skip="no"
+                shift
+            ;;
+            --skip-build)
+                skip="yes"
+                shift
+            ;;
+            --)
+                shift
+                break
+            ;;
+            *)
+                die "${FUNCNAME[0]}: Internal error"
+            ;;
         esac
-        shift 1
     done
 
     if [[ "${skip}" = "yes" ]]; then
@@ -330,7 +353,7 @@ function dast() (
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
             trustify) analyze_trustify_api ;;
-            *) die "$0: Unknown service API: '$1'" ;;
+            *) die "${FUNCNAME[0]}: Unknown service API '$1'" ;;
         esac
         shift 1
     done
@@ -352,15 +375,50 @@ function serve() {
 }
 
 function clean() {
-    cd "${WORKSPACE}/${RAPIDAST}"
-    git clean -dfx
-}
+    local mode="repos"
 
-function reset() {
-    podman stop -i "${CONTAINER}"
-    podman rm -if "${CONTAINER}"
-    podman rmi -if "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"
-    rm -rf "${WORKSPACE}"
+    local opts=$(
+        getopt \
+            --options a \
+            --longoption all \
+            --name ${FUNCNAME[0]} \
+            -- \
+            "$@"
+    )
+
+    eval set -- "${opts}"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+            -a | --all)
+                mode="all"
+                shift
+            ;;
+            --)
+                shift
+                break
+            ;;
+            *)
+                die "${FUNCNAME[0]}: Internal error"
+            ;;
+        esac
+    done
+
+    case "${mode}" in
+        repos)
+            cd "${WORKSPACE}/${RAPIDAST}"
+            git clean -dfx
+        ;;
+        all)
+            podman stop -i "${CONTAINER}"
+            podman rm -if "${CONTAINER}"
+            podman rmi -if "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"
+            rm -rf "${WORKSPACE}"
+        ;;
+        *)
+            die "${FUNCNAME[0]}: Invalid mode '${mode}'"
+        ;;
+    esac
 }
 
 function usage() {
@@ -369,8 +427,8 @@ function usage() {
 
 	where <COMMAND> is one of
 	  all     analyze all APIs
-	  build   build or rebuild the image
-	  clean   remove analysis products (reports)
+	  build   build or rebuild the container image
+	  clean   remove analysis products (reports) or entire work space
 	  clist   show status of containers
 	  clogs   show logs of the container
 	  cstart  start the container
@@ -378,7 +436,6 @@ function usage() {
 	  dast    run RapiDAST on given APIs
 	  help    print this screen and exit
 	  init    initialize a work space
-	  reset   remove the work space, image, and container
 	  serve   run HTTP server with results (default port: ${HTTP_PORT})
 	  update  update the work space
 	__EOF__
@@ -391,9 +448,9 @@ function main() (
     [[ -z "${1:-}" ]] || shift 1
 
     case "${cmd}" in
-        all) runall "$@" ;;
+        all) runall ;;
         build) build_container "$@" ;;
-        clean) clean ;;
+        clean) clean "$@" ;;
         clist) podman ps "$@" ;;
         clogs) show_container_logs "$@" ;;
         cstart) start_container ;;
@@ -401,7 +458,6 @@ function main() (
         dast) dast "$@" ;;
         help) usage ;;
         init) ws_init ;;
-        reset) reset ;;
         serve) serve "$@" ;;
         update) ws_update ;;
         *) die "$0: Unknown command: '${cmd}'" ;;
