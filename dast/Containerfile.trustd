@@ -2,15 +2,26 @@ ARG REGISTRY=ghcr.io/trustification
 ARG IMAGE=trustd
 ARG TAG=latest
 
-FROM ${REGISTRY}/${IMAGE}:${TAG}
+FROM ${REGISTRY}/${IMAGE}:${TAG} AS trustd
 
-RUN groupadd trustd && \
-    useradd -ms /bin/bash -g trustd trustd
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+COPY --from=trustd /usr/local/bin/trustd /usr/local/bin/trustd
+
+RUN microdnf -y reinstall tzdata && \
+    groupadd trustd && \
+    useradd -ms /bin/bash -g trustd trustd && \
+    chown -R trustd /usr/local/bin && \
+    chmod -R u+rwx /usr/local/bin
 
 USER trustd
 
 WORKDIR /home/trustd
 
 EXPOSE 8080
+
+ENV TZ=UTC \
+    AUTH_DISABLED=true \
+    HTTP_SERVER_BIND_ADDR="::"
 
 ENTRYPOINT ["/usr/local/bin/trustd"]

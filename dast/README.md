@@ -19,16 +19,18 @@ This will
    repository into it
 1. create a Python virtual environment and install RapiDAST runtime
    dependencies inside it
-1. spawn containers with Trustify infrastructure and services
-   * this may also (re)build the container with `trustd`
+1. spawn the container with Trustify service
+   * this may also build the custom container image with `trustd`
    * environment variables that can be used to customize this step:
      * `TRUSTIFICATION_REGISTRY` - the container registry with Trustify images
        (default: `ghcr.io/trustification`)
      * `TRUSTD_IMAGE` - the name of the Trustify image (default: `trustd`)
      * `TRUSTD_VERSION` - the tag/version of the Trustify image (default:
        `latest`)
-1. run RapiDAST on exposed APIs of Trustify services
-1. stop all containers
+     * `TRUSTD_VERSION_DAST` - the tag/version used to tag the customized
+       `TRUSTD_IMAGE` (default: `dast`)
+1. run RapiDAST on exposed APIs of the Trustify service
+1. stop the container
 
 Then you can run
 

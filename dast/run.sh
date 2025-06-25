@@ -8,11 +8,17 @@ WORKSPACE="${HERE}/.workspace"
 VENVSPACE="${WORKSPACE}/.venv"
 RAPIDAST="rapidast"
 RAPIDAST_REPO_URL="https://github.com/RedHatProductSecurity/rapidast.git"
+RAPIDAST_CONFIG="${WORKSPACE}/rapidast-config.yaml"
 HTTP_PORT="8765"
 
 TRUSTIFICATION_REGISTRY="${TRUSTIFICATION_REGISTRY:-ghcr.io/trustification}"
 TRUSTD_IMAGE="${TRUSTD_IMAGE:-trustd}"
 TRUSTD_VERSION="${TRUSTD_VERSION:-latest}"
+TRUSTD_VERSION_DAST="${TRUSTD_VERSION_DAST:-dast}"
+
+CONTAINER="${TRUSTD_IMAGE}_${TRUSTD_VERSION_DAST}"
+RETRIES=60
+DELAY=5
 
 function error() {
     echo -e "\e[31m[ERROR]" $* "\e[0m" >&2
@@ -122,33 +128,113 @@ function ws_update() (
     do_repo_op "${RAPIDAST_REPO_URL}" update
 )
 
-function do_containers() (
-    export SELINUX_VOLUME_OPTIONS=':Z'
-    export TRUSTIFICATION_REGISTRY="${TRUSTIFICATION_REGISTRY}"
-    export TRUSTD_IMAGE="${TRUSTD_IMAGE}"
-    export TRUSTD_VERSION="${TRUSTD_VERSION}"
-    export WORKSPACE="${WORKSPACE}"
+function build_container() (
+    local skip="no"
 
-    cd "${WORKSPACE}"
-    podman-compose \
-        -f ../compose.yaml \
-        "$@"
+    if podman container exists "${CONTAINER}"; then
+        skip="yes"
+    fi
+    if podman image exists "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"; then
+        skip="yes"
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+            -f | --force) skip="no" ;;
+            --skip-build) skip="yes" ;;
+            # ignore unknown options as they can have meaning in other subtasks
+        esac
+        shift 1
+    done
+
+    if [[ "${skip}" = "yes" ]]; then
+        return
+    fi
+
+    if podman container exists "${CONTAINER}"; then
+        podman stop -i "${CONTAINER}"
+        podman rm -if "${CONTAINER}"
+    fi
+    if podman image exists "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"; then
+        podman rmi -if "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"
+    fi
+
+    cd "${HERE}"
+    podman build \
+        -f ./Containerfile.trustd \
+        -t "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}" \
+        --build-arg REGISTRY="${TRUSTIFICATION_REGISTRY}" \
+        --build-arg IMAGE="${TRUSTD_IMAGE}" \
+        --build-arg TAG="${TRUSTD_VERSION}" \
+        .
 )
 
-function start_containers() {
-    do_containers up -d
+function cstatus() {
+    podman ps -a --format='{{.Names}}|{{.Status}}' \
+    | grep -Ee '^'"${1:-}"'\|' \
+    | cut -d'|' -f2 \
+    | cut -d' ' -f1
 }
 
-function list_containers() {
-    do_containers ps "$@"
+function cwait() {
+    local counter=1
+    local status
+
+    while true; do
+        echo "Waiting for $1 to be up and running (#${counter})"
+        status="$(cstatus "$1" 2>/dev/null)"
+        case "${status}" in
+            Up | Running)
+                break
+            ;;
+            Created | Initialized)
+                sleep ${DELAY}
+            ;;
+            *)
+                error "$1 is in ${status:-unknown} state"
+                return 1
+            ;;
+        esac
+        counter=$(( counter + 1 ))
+    done
+    echo "$1 is up and running"
 }
 
-function show_containers_logs() {
-    do_containers logs "$@"
+function cready() {
+    [[ "$(cstatus "$1" 2>/dev/null)" == [UR][pu]* ]] \
+    && podman exec "$1" true >/dev/null 2>&1
 }
 
-function stop_containers() {
-    do_containers down
+function start_container() (
+    if ! podman image exists "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"; then
+        build_container
+    fi
+
+    export SELINUX_VOLUME_OPTIONS=':Z'
+
+    cd "${WORKSPACE}"
+    if ! cready "${CONTAINER}"; then
+        podman run \
+            --name "${CONTAINER}" \
+            -p "8080:8080" \
+            -d \
+            "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"
+        cwait "${CONTAINER}"
+    fi
+
+    if ! cready "${CONTAINER}"; then
+        die "Container" "${CONTAINER}" "is not ready." \
+            "Please resolve the issue and try again"
+    fi
+)
+
+function show_container_logs() {
+    if podman container exists "${CONTAINER}"; then
+        podman logs "$@" "${CONTAINER}"
+    fi
+}
+
+function stop_container() {
+    podman stop -i "${CONTAINER}"
 }
 
 # $1 - short name
@@ -184,15 +270,29 @@ function config() {
     echo "      updateAddons: False"
 }
 
+function service_ready() {
+    { curl -f "$1" | jq; } >/dev/null 2>&1
+}
+
+function service_wait() {
+    local counter=1
+
+    while [[ ${counter} -le ${RETRIES} ]]; do
+        echo "Waiting on $1 to be ready (#${counter})"
+        sleep ${DELAY}
+        if service_ready "$1"; then
+            echo "$1 is ready"
+            break
+        fi
+        counter=$(( counter + 1 ))
+    done
+}
+
 function analyze() (
     local inside_venv=$(command -v deactivate >/dev/null 2>&1; echo -n $?)
-    local ready=$(
-        set -o pipefail
-        { curl -f "$3" | jq; } >/dev/null 2>&1
-        echo -n $?
-    )
 
-    if [[ ${ready} -ne 0 ]]; then
+    service_wait "$3"
+    if ! service_ready "$3"; then
         error "$1 is not ready"
         return 1
     fi
@@ -200,9 +300,11 @@ function analyze() (
         cd "${WORKSPACE}/${RAPIDAST}"
         . "${VENVSPACE}/bin/activate"
     fi
-    ./rapidast.py --config <(config "$1" "$2" "$3")
+    config "$1" "$2" "$3" > "${RAPIDAST_CONFIG}"
+    ./rapidast.py --config "${RAPIDAST_CONFIG}"
     if [[ $? -eq 0 ]]; then
-        ./rapidast.py --config <(config "$1" "$2" "$3" "y")
+        config "$1" "$2" "$3" "y" > "${RAPIDAST_CONFIG}"
+        ./rapidast.py --config "${RAPIDAST_CONFIG}"
     else
         skipped "$1 :: activeScan"
     fi
@@ -237,9 +339,9 @@ function dast() (
 
 function runall() (
     ws_init
-    start_containers
+    start_container
     analyze_all
-    stop_containers
+    stop_container
 )
 
 function serve() {
@@ -255,8 +357,10 @@ function clean() {
 }
 
 function reset() {
-    podman system reset -f
-    rm -rfv "${WORKSPACE}"
+    podman stop -i "${CONTAINER}"
+    podman rm -if "${CONTAINER}"
+    podman rmi -if "${TRUSTD_IMAGE}:${TRUSTD_VERSION_DAST}"
+    rm -rf "${WORKSPACE}"
 }
 
 function usage() {
@@ -265,15 +369,16 @@ function usage() {
 
 	where <COMMAND> is one of
 	  all     analyze all APIs
+	  build   build or rebuild the image
 	  clean   remove analysis products (reports)
 	  clist   show status of containers
-	  clogs   show logs of containers
-	  cstart  start containers
-	  cstop   stop containers
+	  clogs   show logs of the container
+	  cstart  start the container
+	  cstop   stop the container
 	  dast    run RapiDAST on given APIs
 	  help    print this screen and exit
 	  init    initialize a work space
-	  reset   remove workspaces and reset podman
+	  reset   remove the work space, image, and container
 	  serve   run HTTP server with results (default port: ${HTTP_PORT})
 	  update  update the work space
 	__EOF__
@@ -287,11 +392,12 @@ function main() (
 
     case "${cmd}" in
         all) runall "$@" ;;
+        build) build_container "$@" ;;
         clean) clean ;;
-        clist) list_containers "$@" ;;
-        clogs) show_containers_logs "$@" ;;
-        cstart) start_containers ;;
-        cstop) stop_containers ;;
+        clist) podman ps "$@" ;;
+        clogs) show_container_logs "$@" ;;
+        cstart) start_container ;;
+        cstop) stop_container ;;
         dast) dast "$@" ;;
         help) usage ;;
         init) ws_init ;;
