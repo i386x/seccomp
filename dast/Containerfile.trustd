@@ -1,0 +1,16 @@
+ARG REGISTRY=ghcr.io/trustification
+ARG IMAGE=trustd
+ARG TAG=latest
+
+FROM ${REGISTRY}/${IMAGE}:${TAG}
+
+RUN groupadd trustd && \
+    useradd -ms /bin/bash -g trustd trustd
+
+USER trustd
+
+WORKDIR /home/trustd
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/trustd"]

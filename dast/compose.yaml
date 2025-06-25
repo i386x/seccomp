@@ -1,0 +1,17 @@
+version: "3"
+
+services:
+  trustify:
+    build:
+      dockerfile: "./Containerfile.trustd"
+      args:
+        REGISTRY: "${TRUSTIFICATION_REGISTRY:?TRUSTIFICATION_REGISTRY is required}"
+        IMAGE: "${TRUSTD_IMAGE:?TRUSTD_IMAGE is required}"
+        TAG: "${TRUSTD_VERSION:?TRUSTD_VERSION is required}"
+    ports:
+      - "8080:8080"
+    environment:
+      AUTH_DISABLED: "true"
+    volumes:
+      - "${WORKSPACE:?WORKSPACE is required}:/home/trustd:Z"
+    restart: on-failure
