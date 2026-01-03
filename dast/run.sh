@@ -6,9 +6,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 WORKSPACE="${HERE}/.workspace"
 VENVSPACE="${WORKSPACE}/.venv"
+ARCHIVES="${WORKSPACE}/archives"
 RAPIDAST="rapidast"
 RAPIDAST_REPO_URL="https://github.com/RedHatProductSecurity/rapidast.git"
 RAPIDAST_CONFIG="${WORKSPACE}/rapidast-config.yaml"
+RAPIDAST_DIR="${WORKSPACE}/${RAPIDAST}"
+RAPIDAST_RESULTS="${RAPIDAST_DIR}/results"
 HTTP_PORT="8765"
 
 TRUSTIFICATION_REGISTRY="${TRUSTIFICATION_REGISTRY:-ghcr.io/trustification}"
@@ -105,7 +108,7 @@ function do_repo_op() {
 }
 
 function setup_rapidast_venv() (
-    cd "${WORKSPACE}/${RAPIDAST}"
+    cd "${RAPIDAST_DIR}"
     if [[ ! -d "${VENVSPACE}" ]]; then
         python -m venv "${VENVSPACE}"
         . "${VENVSPACE}/bin/activate"
@@ -320,7 +323,7 @@ function analyze() (
         return 1
     fi
     if [[ ${inside_venv} -eq 1 ]]; then
-        cd "${WORKSPACE}/${RAPIDAST}"
+        cd "${RAPIDAST_DIR}"
         . "${VENVSPACE}/bin/activate"
     fi
     config "$1" "$2" "$3" > "${RAPIDAST_CONFIG}"
@@ -341,14 +344,14 @@ function analyze_trustify_api() (
 )
 
 function analyze_all() (
-    cd "${WORKSPACE}/${RAPIDAST}"
+    cd "${RAPIDAST_DIR}"
     . "${VENVSPACE}/bin/activate"
     analyze_trustify_api
     deactivate
 )
 
 function dast() (
-    cd "${WORKSPACE}/${RAPIDAST}"
+    cd "${RAPIDAST_DIR}"
     . "${VENVSPACE}/bin/activate"
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
@@ -360,10 +363,45 @@ function dast() (
     deactivate
 )
 
+function pack() (
+    local today="$(date '+%Y-%m-%d')"
+    local tag=1
+    local name
+    local archives=( )
+
+    ensure_dir "${ARCHIVES}"
+    cd "${ARCHIVES}"
+    archives+=( $( \
+        find . -maxdepth 1 -name "${today}*.zip" -type f -print \
+        | grep -Ee '\.[0-9]+\.zip' \
+        | cut -d'.' -f3 \
+        | sort -rn \
+    ) ) || :
+    if [[ ${#archives[@]} -gt 0 ]]; then
+        tag=$(( ${archives[0]} + 1 ))
+    fi
+    name="${today}.${tag}"
+    rm -rf "./${name:-foodir}"
+    ensure_dir "./${name}"
+    cd "${name}"
+    if [[ ! -d "${RAPIDAST_RESULTS}" ]]; then
+        error "${FUNCNAME[0]}: No reports to archive"
+        return 1
+    fi
+    cp -r "${RAPIDAST_RESULTS}" .
+    {
+        echo "podman ps -a --filter name=${CONTAINER}"
+        podman ps -a --filter name="${CONTAINER}"
+    } > "podman_ps"
+    cd ".."
+    zip -r "${name}.zip" "${name}"
+)
+
 function runall() (
     ws_init
     start_container
     analyze_all
+    pack
     stop_container
 )
 
@@ -371,7 +409,7 @@ function serve() {
     python \
         -m http.server \
         "${1:-${HTTP_PORT}}" \
-        -d "${WORKSPACE}/${RAPIDAST}/results"
+        -d "${RAPIDAST_RESULTS}"
 }
 
 function clean() {
@@ -436,6 +474,7 @@ function usage() {
 	  dast    run RapiDAST on given APIs
 	  help    print this screen and exit
 	  init    initialize a work space
+	  pack    pack analysis reports into zip archive
 	  serve   run HTTP server with results (default port: ${HTTP_PORT})
 	  update  update the work space
 	__EOF__
@@ -458,6 +497,7 @@ function main() (
         dast) dast "$@" ;;
         help) usage ;;
         init) ws_init ;;
+        pack) pack ;;
         serve) serve "$@" ;;
         update) ws_update ;;
         *) die "$0: Unknown command: '${cmd}'" ;;
